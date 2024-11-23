@@ -1,11 +1,12 @@
-import keyboard
-import time
 import tkinter as tk
 from tkinter import ttk
+from tkinter import messagebox
 from configparser import ConfigParser
 import os
 import win32api
+import keyboard
 import threading
+import time
 import sys
 
 class KeyPresserApp:
@@ -15,20 +16,51 @@ class KeyPresserApp:
             self.root.title("Key Presser")
             self.root.geometry("300x200")
             
-            # Load config with error handling
+            # Add system delay compensation calculation
+            self.system_delay_compensation = 1.0
             try:
-                self.config = ConfigParser()
-                if not os.path.exists('config.ini'):
-                    self.create_default_config()
-                self.config.read('config.ini')
-                self.trigger_key = int(self.config['Settings']['trigger_key'])
+                # Test system responsiveness
+                start = time.perf_counter()
+                time.sleep(0.01)
+                end = time.perf_counter()
+                actual_delay = end - start
+                self.system_delay_compensation = 0.01 / actual_delay
+                print(f"System delay compensation: {self.system_delay_compensation}")
             except Exception as e:
-                print(f"Error loading config: {e}")
-                # Set default if config fails
-                self.trigger_key = 1
-                self.create_default_config()
+                print(f"Could not calculate system delay compensation: {e}")
+                self.system_delay_compensation = 1.0
             
-            # Load additional settings from config
+            # Initialize default values
+            self.trigger_key = 1
+            self.repeat_enabled = True
+            self.key_delay = 0.05
+            self.speed_multiplier = 1.0
+            
+            # Get the local app data directory
+            self.config_dir = os.path.join(os.getenv('LOCALAPPDATA'), 'KeyPresser')
+            self.config_path = os.path.join(self.config_dir, 'config.ini')
+            
+            # Create config directory if it doesn't exist
+            try:
+                os.makedirs(self.config_dir, exist_ok=True)
+            except Exception as e:
+                messagebox.showwarning(
+                    "Config Directory Error",
+                    f"Could not create config directory: {e}\nUsing default settings."
+                )
+            
+            # Initialize config
+            self.config = ConfigParser()
+            self.config['Settings'] = {}  # Create Settings section
+            
+            # Load existing config or create default
+            if os.path.exists(self.config_path):
+                self.config.read(self.config_path)
+            else:
+                self.create_default_config()
+                
+            # Get settings with fallbacks
+            self.trigger_key = self.config.getint('Settings', 'trigger_key', fallback=1)
             self.repeat_enabled = self.config.getboolean('Settings', 'repeat_enabled', fallback=True)
             self.key_delay = self.config.getfloat('Settings', 'key_delay', fallback=0.05)
             self.speed_multiplier = self.config.getfloat('Settings', 'speed_multiplier', fallback=1.0)
@@ -60,11 +92,6 @@ class KeyPresserApp:
                 command=self.toggle_script
             )
             self.toggle_button.grid(row=2, column=0, pady=5)
-            
-            # Flags
-            self.capturing = False
-            self.running = False
-            self.monitor_thread = None
             
             # Add repeat toggle checkbox
             self.repeat_var = tk.BooleanVar(value=self.repeat_enabled)
@@ -115,18 +142,10 @@ class KeyPresserApp:
             self.speed_combo.grid(row=0, column=1, padx=5)
             self.speed_combo.bind('<<ComboboxSelected>>', lambda _: self.save_settings())
             
-            # Add system-specific delay compensation
-            self.system_delay_compensation = 1.0
-            try:
-                # Test system responsiveness
-                start = time.perf_counter()
-                time.sleep(0.01)
-                end = time.perf_counter()
-                actual_delay = end - start
-                self.system_delay_compensation = 0.01 / actual_delay
-                print(f"System delay compensation: {self.system_delay_compensation}")
-            except:
-                print("Could not calculate system delay compensation")
+            # Flags
+            self.capturing = False
+            self.running = False
+            self.monitor_thread = None
             
         except Exception as e:
             print(f"Error during initialization: {e}")
@@ -134,17 +153,32 @@ class KeyPresserApp:
     
     def create_default_config(self):
         try:
-            self.config = ConfigParser()
             self.config['Settings'] = {
-                'trigger_key': '1',
+                'trigger_key': str(self.trigger_key),
                 'repeat_enabled': 'true',
                 'key_delay': '0.05',
                 'speed_multiplier': '1.0'
             }
-            with open('config.ini', 'w') as f:
-                self.config.write(f)
+            
+            try:
+                with open(self.config_path, 'w') as configfile:
+                    self.config.write(configfile)
+            except PermissionError:
+                # Try alternative location if first attempt fails
+                alt_config_path = os.path.join(os.path.expanduser('~'), 'keypress_config.ini')
+                with open(alt_config_path, 'w') as configfile:
+                    self.config.write(configfile)
+                self.config_path = alt_config_path  # Update config path to new location
+                messagebox.showinfo(
+                    "Config Location Changed",
+                    f"Config file saved to alternative location: {alt_config_path}"
+                )
+                
         except Exception as e:
-            print(f"Error creating config: {e}")
+            messagebox.showwarning(
+                "Config Error",
+                f"Could not save config: {e}\nSettings will not be saved between runs."
+            )
     
     def start_capture(self):
         if not self.capturing:
@@ -171,7 +205,7 @@ class KeyPresserApp:
                             button_number = i + 1
                             self.trigger_key = button_number
                             self.config['Settings']['trigger_key'] = str(button_number)
-                            with open('config.ini', 'w') as f:
+                            with open(self.config_path, 'w') as f:
                                 self.config.write(f)
                             
                             self.root.after(0, lambda b=button_number: self.status_label.config(
@@ -191,6 +225,9 @@ class KeyPresserApp:
         except Exception as e:
             print(f"Error in capture_mouse_button: {e}")
             self.capturing = False
+            self.root.after(0, lambda: self.config_button.config(
+                text="Press to configure new button"
+            ))
     
     def perform_key_sequence(self):
         """Perform the space+shift key sequence"""
@@ -244,16 +281,19 @@ class KeyPresserApp:
             last_press_time = 0
             button_was_pressed = False
             
+            # Ensure system_delay_compensation exists
+            if not hasattr(self, 'system_delay_compensation'):
+                self.system_delay_compensation = 1.0
+            
             while self.running:
                 try:
                     current_state = win32api.GetAsyncKeyState(self.trigger_key)
-                    current_time = time.perf_counter()  # More precise timing
+                    current_time = time.perf_counter()
                     
-                    # Check if button is pressed (negative state indicates pressed)
                     if current_state < 0:  
                         if not button_was_pressed or (
                             self.repeat_enabled and 
-                            current_time - last_press_time >= (self.key_delay * self.system_delay_compensation)
+                            current_time - last_press_time >= self.key_delay
                         ):
                             print(f"Button {self.trigger_key} pressed at {current_time}")
                             self.perform_key_sequence()
@@ -262,8 +302,9 @@ class KeyPresserApp:
                     else:
                         button_was_pressed = False
                     
-                    # Dynamic sleep based on system performance
-                    time.sleep(min(0.01 * self.system_delay_compensation, 0.01))
+                    # Use a safe sleep time if compensation isn't working
+                    sleep_time = min(0.01 * self.system_delay_compensation, 0.01)
+                    time.sleep(max(0.001, sleep_time))  # Ensure positive sleep time
                     
                 except Exception as e:
                     print(f"Error in monitor_mouse loop: {e}")
@@ -303,14 +344,34 @@ class KeyPresserApp:
         try:
             self.repeat_enabled = self.repeat_var.get()
             self.key_delay = self.delay_var.get()
-            self.speed_multiplier = self.speeds[self.speed_var.get()]  # Get multiplier from selected speed
-            self.config['Settings']['repeat_enabled'] = str(self.repeat_enabled).lower()
-            self.config['Settings']['key_delay'] = str(self.key_delay)
-            self.config['Settings']['speed_multiplier'] = str(self.speed_multiplier)
-            with open('config.ini', 'w') as f:
-                self.config.write(f)
+            self.speed_multiplier = self.speeds[self.speed_var.get()]
+            
+            self.config['Settings'] = {
+                'trigger_key': str(self.trigger_key),
+                'repeat_enabled': str(self.repeat_enabled).lower(),
+                'key_delay': str(self.key_delay),
+                'speed_multiplier': str(self.speed_multiplier)
+            }
+            
+            try:
+                with open(self.config_path, 'w') as configfile:
+                    self.config.write(configfile)
+            except PermissionError as e:
+                messagebox.showwarning(
+                    "Save Error",
+                    "Could not save settings due to permissions.\nTry running as administrator."
+                )
+            except Exception as e:
+                messagebox.showwarning(
+                    "Save Error",
+                    f"Could not save settings: {e}"
+                )
+                
         except Exception as e:
-            print(f"Error saving settings: {e}")
+            messagebox.showwarning(
+                "Settings Error",
+                f"Error saving settings: {e}"
+            )
 
 def main():
     try:
