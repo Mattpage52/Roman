@@ -115,6 +115,19 @@ class KeyPresserApp:
             self.speed_combo.grid(row=0, column=1, padx=5)
             self.speed_combo.bind('<<ComboboxSelected>>', lambda _: self.save_settings())
             
+            # Add system-specific delay compensation
+            self.system_delay_compensation = 1.0
+            try:
+                # Test system responsiveness
+                start = time.perf_counter()
+                time.sleep(0.01)
+                end = time.perf_counter()
+                actual_delay = end - start
+                self.system_delay_compensation = 0.01 / actual_delay
+                print(f"System delay compensation: {self.system_delay_compensation}")
+            except:
+                print("Could not calculate system delay compensation")
+            
         except Exception as e:
             print(f"Error during initialization: {e}")
             sys.exit(1)
@@ -180,51 +193,92 @@ class KeyPresserApp:
             self.capturing = False
     
     def perform_key_sequence(self):
+        """Perform the space+shift key sequence"""
         try:
-            adjusted_delay = self.key_delay / self.speed_multiplier  # Apply speed multiplier
-            print("Pressing space...")
-            keyboard.press('space')
-            time.sleep(adjusted_delay)
-            print("Pressing shift...")
-            keyboard.press('shift')
-            time.sleep(adjusted_delay)
-            print("Releasing space...")
+            # Release any potentially stuck keys first
             keyboard.release('space')
-            print("Releasing shift...")
             keyboard.release('shift')
+            
+            # Calculate adjusted delay based on system speed
+            base_delay = self.key_delay / self.speeds[self.speed_var.get()]
+            adjusted_delay = base_delay * self.system_delay_compensation
+            
+            # Ensure minimum delay
+            adjusted_delay = max(adjusted_delay, 0.001)
+            
+            print(f"Using adjusted delay: {adjusted_delay}")
+            
+            # Complete sequence with proper delays
+            keyboard.press('space')
+            print("Space pressed")
+            time.sleep(adjusted_delay)
+            
+            keyboard.press('shift')
+            print("Shift pressed")
+            time.sleep(adjusted_delay)
+            
+            keyboard.release('space')
+            print("Space released")
+            time.sleep(adjusted_delay / 2)
+            
+            keyboard.release('shift')
+            print("Shift released")
+            time.sleep(adjusted_delay / 2)
+            
             print("Sequence complete!")
+            
         except Exception as e:
             print(f"Error in key sequence: {e}")
+            # Emergency key release
+            try:
+                keyboard.release('space')
+                keyboard.release('shift')
+            except:
+                pass
     
     def monitor_mouse(self):
+        """Monitor for mouse button presses"""
         try:
-            print("Monitoring started - waiting for button press...")
+            print(f"Monitoring started - System: {sys.platform}, Windows version: {sys.getwindowsversion()}")
+            print(f"Using trigger key: {self.trigger_key}")
             last_press_time = 0
             button_was_pressed = False
             
             while self.running:
                 try:
-                    button_state = win32api.GetAsyncKeyState(self.trigger_key) < 0
-                    current_time = time.time()
+                    current_state = win32api.GetAsyncKeyState(self.trigger_key)
+                    current_time = time.perf_counter()  # More precise timing
                     
-                    if button_state:  # Button is currently pressed
-                        if not button_was_pressed or (self.repeat_enabled and current_time - last_press_time > self.key_delay):
-                            print(f"Button {self.trigger_key} pressed! Performing key sequence...")
+                    # Check if button is pressed (negative state indicates pressed)
+                    if current_state < 0:  
+                        if not button_was_pressed or (
+                            self.repeat_enabled and 
+                            current_time - last_press_time >= (self.key_delay * self.system_delay_compensation)
+                        ):
+                            print(f"Button {self.trigger_key} pressed at {current_time}")
                             self.perform_key_sequence()
                             last_press_time = current_time
-                            print("Key sequence completed")
                         button_was_pressed = True
                     else:
                         button_was_pressed = False
-                        
-                    time.sleep(0.01)
+                    
+                    # Dynamic sleep based on system performance
+                    time.sleep(min(0.01 * self.system_delay_compensation, 0.01))
+                    
                 except Exception as e:
-                    print(f"Error monitoring mouse: {e}")
+                    print(f"Error in monitor_mouse loop: {e}")
                     time.sleep(0.1)
+                    
         except Exception as e:
             print(f"Fatal error in monitor_mouse: {e}")
+        finally:
             self.running = False
             self.root.after(0, lambda: self.toggle_button.config(text="Start"))
+            try:
+                keyboard.release('space')
+                keyboard.release('shift')
+            except:
+                pass
     
     def toggle_script(self):
         try:
